@@ -6,88 +6,62 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 
-
 internal class Program
 {
-
     private static readonly HttpClient client = new HttpClient();
+
     private static async Task Main(string[] args)
     {
         client.Timeout = TimeSpan.FromSeconds(10000);
         string apiUrl = "http://localhost:11434/api/chat";
 
-        Console.WriteLine("Welcome to phi Chat!");
-        Console.WriteLine("Type your question below (type 'exit' to quit):");
+        Console.WriteLine("Welcome to JackBot!");
+        Console.WriteLine("Type your question below (type '/bye' to quit):");
 
-        // Prepare the JSON payload
-        var payload = new AiModelViewModel();
-
-        payload.Model = "Phi3";
-        payload.Stream = false;
-        payload.Messages = new List<MessageViewModel>();
+        var payload = new AiModelViewModel
+        {
+            Model = "qwen3:0.6b",
+            Stream = false,
+            Messages = new List<MessageViewModel>()
+        };
 
         MessageViewModel systemMessage = new()
         {
             Role = "system",
-            Content = @"you are a .net developer that assisting to user to solve C# and 
-                        .net problems you have access to several function that can be call here is the list of
-                        functions and the instructure of how to call it be carefull when you need to call these functions
-                        you have to call the functiuon exacly like that provided here 
-                        AI Agent Function Call Protocol
-Objective: Execute specific functions exactly as defined below when user inputs match trigger conditions.
+            Content = @"You are JackBot, a helpful AI assistant that can either answer questions naturally or call special tools.
 
-Function Definitions
-1. Function: Greeting
-Trigger Condition: When the user introduces themselves (e.g., ""Hi, I'm John"").
+## When to Use Tools:
+Only respond with a function call **if** the user clearly asks for the **weather** (e.g., by asking about the temperature, forecast, rain, snow, etc.).
 
-Call Syntax: Greeting:[userName]|[isNeedToAnswerAnotherQuestion]
+- If the city is provided, return only the JSON block like this:
+{
+  ""function_call"": {
+    ""name"": ""GetWeather"",
+    ""arguments"": {
+      ""city"": ""<city name>""
+    }
+  }
+}
 
-Replace [userName] with the exact name provided by the user.
-Replace [isNeedToAnswerAnotherQuestion] with true or false
-true for situation that user ask another question of phrase that you need to response 
-false for situation that there is nothing special to answer and the user prompt is a simple greeting
-Example:
+- If the user asks about the weather but does **not** mention a city, ask **politely** which city they are asking about.
 
-User says: ""My name is Alice.""
+## All Other Cases:
+- Do **not** call any function.
+- Do **not** guess or assume city names.
+- Simply reply as a normal assistant, unless the user explicitly asks about the weather.
 
-Agent calls: Greeting:Alice|false
+## Strict Rules:
+- Never assume the user wants weather info unless they clearly ask.
+- Never use default cities like ""Tehran"" unless the user says so.
+- Never respond with function_call if the user is just introducing themselves or chatting casually.
+- When a function is called and its result is returned as a tool message (like temperature and city), use that to respond naturally to the user.
 
-Rules
-Syntax Compliance:
-
-Use only the defined syntax. Do not modify function names, parameter brackets, or delimiters.
-
-Correct: Greeting:John|false
-
-Incorrect: greeting:John, Greeting John, Greeting-John
-
-Parameter Handling:
-
-Replace placeholders (e.g., [userName]) with actual values.
-
-Never include [ ] brackets in the final function call.
-
-Scope:
-
-Use only the functions listed here. Ignore unrecognized requests.
-
-Example Interaction
-User Input:
-
-""Hello, I’m Sarah. how is the weather?""
-
-Agent Action:
-
-Detect self-introduction.
-
-Execute: Greeting:Sarah|true.
-
-Notes
-Add new functions in the same format if required.
-
-Report errors if a function fails to execute."
+You must always behave naturally and avoid technical terms like ""function_call"" in normal replies unless returning structured JSON as instructed.
+"
         };
+
         payload.Messages.Add(systemMessage);
+
         while (true)
         {
             Console.Write("> ");
@@ -99,36 +73,94 @@ Report errors if a function fails to execute."
                 break;
             }
 
-            MessageViewModel userMessage = new MessageViewModel();
-            userMessage.Role = "user";
-            userMessage.Content = userInput;
+            payload.Messages.Add(new MessageViewModel
+            {
+                Role = "user",
+                Content = userInput
+            });
 
-            payload.Messages.Add(userMessage);
-
-            string jsonPayload = JsonSerializer.Serialize(payload);
+            var jsonPayload = JsonSerializer.Serialize(payload);
             var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
 
             try
             {
-                // Reuse HttpClient for efficiency
-                HttpResponseMessage response = await client.PostAsync(apiUrl, content);
-
+                var response = await client.PostAsync(apiUrl, content);
                 response.EnsureSuccessStatusCode();
-                var responseContent = response.Content.ReadFromJsonAsync<ResponseViewModel>();
 
-                MessageViewModel AssistentMessage = new()
+                var responseContent = await response.Content.ReadFromJsonAsync<ResponseViewModel>();
+                var assistantContent = responseContent?.Message?.Content;
+
+                if (string.IsNullOrWhiteSpace(assistantContent))
                 {
-                    Role = responseContent.Result.Message.Role,
-                    Content = responseContent.Result.Message.Content
-                };
-                payload.Messages.Add(AssistentMessage);
+                    Console.WriteLine("❌ Empty response.");
+                    continue;
+                }
 
-                Console.WriteLine($"Phi3: {responseContent.Result.Message.Content}");
+                if (assistantContent.Contains("\"function_call\""))
+                {
+                    var assistantContentList = assistantContent.Split("</think>");
+                    var parsed = JsonDocument.Parse(assistantContentList[1]);
+                    var fnCall = parsed.RootElement.GetProperty("function_call");
+                    var fnName = fnCall.GetProperty("name").GetString();
+                    var city = fnCall.GetProperty("arguments").GetProperty("city").GetString();
+
+                    if (fnName == "GetWeather")
+                    {
+                        string weatherResult = GetWeather(city!);
+
+                        var toolMessage = new MessageViewModel
+                        {
+                            Role = "tool",
+                            Content = JsonSerializer.Serialize(new
+                            {
+                                temperature = weatherResult,
+                                city = city
+                            })
+                        };
+
+                        payload.Messages.Add(new MessageViewModel
+                        {
+                            Role = "assistant",
+                            Content = assistantContent
+                        });
+                        Console.WriteLine($"JackBot: {assistantContent}");
+                        payload.Messages.Add(toolMessage);
+                        Console.WriteLine($"Tool: {toolMessage.Content}");
+
+                        var toolPayload = JsonSerializer.Serialize(payload);
+                        var toolContent = new StringContent(toolPayload, Encoding.UTF8, "application/json");
+                        var finalResponse = await client.PostAsync(apiUrl, toolContent);
+                        finalResponse.EnsureSuccessStatusCode();
+
+                        var finalResult = await finalResponse.Content.ReadFromJsonAsync<ResponseViewModel>();
+                        payload.Messages.Add(finalResult.Message);
+                        Console.WriteLine($"JackBot: {finalResult?.Message?.Content}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("❌ Unknown function name.");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"JackBot: {assistantContent}");
+                    payload.Messages.Add(new MessageViewModel
+                    {
+                        Role = responseContent?.Message?.Role,
+                        Content = assistantContent
+                    });
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"An error occurred: {ex.Message}");
+                Console.WriteLine($"⚠️ Error: {ex.Message}");
             }
         }
+    }
+
+    static string GetWeather(string city)
+    {
+        // Mock implementation
+        return "25°C";
     }
 }

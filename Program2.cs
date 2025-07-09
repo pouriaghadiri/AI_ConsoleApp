@@ -2,9 +2,9 @@
 using System.Text.Json.Serialization;
 using System.Net.Http.Headers;
 
-class Program2
+class Program1
 {
-    static async Task Main(string[] args)
+    static async Task Main1(string[] args)
     {
         var userPrompt = "You are a function-calling AI. You can call functions using JSON only.\n\n" +
                          "Function Name: GetWeather\n" +
